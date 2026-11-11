@@ -85,6 +85,10 @@ docker compose --profile demo up --build  # additionally seeds demo data
 CI also builds the exact production image and smoke-tests it (`GET /health/ready` must return
 `200` with `"ready": true`) on every push — see the `docker` job in `.github/workflows/ci.yml`.
 
+**Windows only:** if Docker Desktop is not yet installed, run the elevated one-shot setup
+`powershell -ExecutionPolicy Bypass -File scripts/install-docker-windows.ps1` (enables the
+VirtualMachinePlatform feature, refreshes WSL and installs Docker Desktop via winget), then reboot.
+
 ### Demo credentials (simulation only)
 
 | Email | Role | Password | PIN |
