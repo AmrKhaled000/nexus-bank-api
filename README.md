@@ -82,6 +82,9 @@ docker compose up --build                 # db + redis + api (+ worker) on :3000
 docker compose --profile demo up --build  # additionally seeds demo data
 ```
 
+CI also builds the exact production image and smoke-tests it (`GET /health/ready` must return
+`200` with `"ready": true`) on every push — see the `docker` job in `.github/workflows/ci.yml`.
+
 ### Demo credentials (simulation only)
 
 | Email | Role | Password | PIN |
