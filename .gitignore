@@ -1,0 +1,16 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+!.env.test.example
+.dev-mail/
+.dev-mail-test/
+*.log
+.DS_Store
+.vscode/
+.idea/
+prisma/*.db
+prisma/*.db-journal
+postman/NEXUS_BANK.postman_collection.json.tmp

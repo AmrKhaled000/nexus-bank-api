@@ -1,0 +1,724 @@
+// NEXUS BANK - enterprise digital banking & wallet management (educational simulation)
+// Financial amounts are stored as BIGINT minor units (piastres/cents). NEVER floats.
+// PostgreSQL enforces journal balance, immutable ledger and balance projections via SQL triggers
+// added in the initial migration (see prisma/migrations).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum UserRole {
+  CUSTOMER
+  SUPPORT
+  FINANCE_ADMIN
+  SUPER_ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  PENDING_VERIFICATION
+  SUSPENDED
+  FROZEN
+  CLOSED
+}
+
+enum WalletType {
+  PERSONAL
+  SAVINGS
+}
+
+enum WalletStatus {
+  ACTIVE
+  PENDING_VERIFICATION
+  SUSPENDED
+  FROZEN
+  CLOSED
+}
+
+enum LedgerAccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+}
+
+enum NormalBalance {
+  DEBIT
+  CREDIT
+}
+
+enum JournalEntryStatus {
+  POSTED
+}
+
+enum TransactionType {
+  DEPOSIT
+  WITHDRAWAL
+  TRANSFER
+  FEE
+  REFUND
+  REVERSAL
+  ADJUSTMENT
+}
+
+enum TransactionStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+  REVERSED
+}
+
+enum DepositStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+  EXPIRED
+}
+
+enum WithdrawalStatus {
+  PENDING
+  UNDER_REVIEW
+  APPROVED
+  PROCESSING
+  COMPLETED
+  REJECTED
+  FAILED
+  CANCELLED
+}
+
+enum PaymentProvider {
+  SIMULATED
+  STRIPE
+}
+
+enum PaymentMethodType {
+  PAYOUT_BANK_ACCOUNT
+}
+
+enum IdempotencyStatus {
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+}
+
+enum VerificationPurpose {
+  EMAIL_VERIFICATION
+  PASSWORD_RESET
+}
+
+enum LimitScope {
+  TRANSFER
+  DEPOSIT
+  WITHDRAWAL
+}
+
+enum FeeOperation {
+  TRANSFER
+  WITHDRAWAL
+  DEPOSIT
+}
+
+enum HoldStatus {
+  ACTIVE
+  CONSUMED
+  RELEASED
+}
+
+enum WebhookStatus {
+  PROCESSED
+  IGNORED
+  FAILED
+}
+
+enum NotificationType {
+  EMAIL_VERIFICATION
+  PASSWORD_RESET
+  DEPOSIT_COMPLETED
+  DEPOSIT_FAILED
+  TRANSFER_SENT
+  TRANSFER_RECEIVED
+  WITHDRAWAL_UPDATE
+  ACCOUNT_UPDATE
+  SECURITY_ALERT
+  STATEMENT_READY
+}
+
+enum SecuritySeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum SecurityEventType {
+  LOGIN_FAILED
+  LOGIN_LOCKED
+  REFRESH_TOKEN_REUSE
+  PIN_FAILED
+  PIN_LOCKED
+  PASSWORD_CHANGED
+  PASSWORD_RESET
+  TWO_FACTOR_ENABLED
+  TWO_FACTOR_DISABLED
+  WEBHOOK_SIGNATURE_INVALID
+  SUSPICIOUS_TRANSACTION
+  ADMIN_ACTION
+  ACCOUNT_STATUS_CHANGED
+}
+
+// ---------------------------------------------------------------------------
+// Identity & access
+// ---------------------------------------------------------------------------
+
+model User {
+  id                  String     @id @default(cuid())
+  email               String     @unique
+  name                String
+  passwordHash        String
+  pinHash             String?
+  pinSetAt            DateTime?  @db.Timestamptz(3)
+  role                UserRole   @default(CUSTOMER)
+  status              UserStatus @default(PENDING_VERIFICATION)
+  emailVerifiedAt     DateTime?  @db.Timestamptz(3)
+  totpSecretEncrypted String?
+  totpEnabled         Boolean    @default(false)
+  totpLastUsedStep    Int?
+  failedLoginAttempts Int        @default(0)
+  lockedUntil         DateTime?  @db.Timestamptz(3)
+  pinFailedAttempts   Int        @default(0)
+  pinLockedUntil      DateTime?  @db.Timestamptz(3)
+  lastLoginAt         DateTime?  @db.Timestamptz(3)
+  createdAt           DateTime   @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime   @updatedAt @db.Timestamptz(3)
+  deletedAt           DateTime?  @db.Timestamptz(3)
+
+  sessions              UserSession[]
+  verifications         UserVerification[]
+  wallets               Wallet[]
+  paymentMethods        PaymentMethodReference[]
+  journalEntries        JournalEntry[]           @relation("JournalCreatedBy")
+  initiatedTransactions FinancialTransaction[]   @relation("TransactionInitiator")
+  sentTransfers         Transfer[]               @relation("TransferSender")
+  receivedTransfers     Transfer[]               @relation("TransferRecipient")
+  deposits              Deposit[]
+  withdrawals           Withdrawal[]
+  reviewedWithdrawals   Withdrawal[]             @relation("WithdrawalReviewer")
+  notifications         Notification[]
+  securityEvents        SecurityEvent[]
+  auditLogs             AuditLog[]               @relation("AuditActor")
+  idempotencyKeys       IdempotencyKey[]
+  transactionLimits     TransactionLimit[]
+
+  @@index([status, createdAt])
+  @@index([role, status])
+  @@map("users")
+}
+
+model UserSession {
+  id            String    @id @default(cuid())
+  userId        String
+  deviceName    String?
+  userAgent     String?
+  ipHash        String?
+  createdAt     DateTime  @default(now()) @db.Timestamptz(3)
+  lastUsedAt    DateTime  @default(now()) @db.Timestamptz(3)
+  expiresAt     DateTime  @db.Timestamptz(3)
+  revokedAt     DateTime? @db.Timestamptz(3)
+  revokedReason String?
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  refreshTokens RefreshToken[]
+
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
+  @@map("user_sessions")
+}
+
+model RefreshToken {
+  id                String    @id @default(cuid())
+  sessionId         String
+  tokenHash         String    @unique
+  expiresAt         DateTime  @db.Timestamptz(3)
+  createdAt         DateTime  @default(now()) @db.Timestamptz(3)
+  usedAt            DateTime? @db.Timestamptz(3)
+  revokedAt         DateTime? @db.Timestamptz(3)
+  replacedByTokenId String?
+  reuseDetectedAt   DateTime? @db.Timestamptz(3)
+
+  session UserSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+model UserVerification {
+  id         String              @id @default(cuid())
+  userId     String
+  purpose    VerificationPurpose
+  tokenHash  String              @unique
+  expiresAt  DateTime            @db.Timestamptz(3)
+  consumedAt DateTime?           @db.Timestamptz(3)
+  createdAt  DateTime            @default(now()) @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, purpose])
+  @@index([expiresAt])
+  @@map("user_verifications")
+}
+
+// ---------------------------------------------------------------------------
+// Wallets & currencies
+// ---------------------------------------------------------------------------
+
+model Currency {
+  code      String   @id @db.VarChar(3)
+  name      String
+  symbol    String
+  exponent  Int      @default(2)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  wallets               Wallet[]
+  ledgerAccounts        LedgerAccount[]
+  journalEntries        JournalEntry[]
+  financialTransactions FinancialTransaction[]
+  transactionLimits     TransactionLimit[]
+  feePolicies           FeePolicy[]
+  deposits              Deposit[]
+  withdrawals           Withdrawal[]
+
+  @@map("currencies")
+}
+
+model Wallet {
+  id           String       @id @default(cuid())
+  userId       String
+  currencyCode String       @db.VarChar(3)
+  name         String
+  type         WalletType   @default(PERSONAL)
+  status       WalletStatus @default(ACTIVE)
+  isPrimary    Boolean      @default(false)
+  createdAt    DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime     @updatedAt @db.Timestamptz(3)
+  closedAt     DateTime?    @db.Timestamptz(3)
+
+  user                 User                   @relation(fields: [userId], references: [id], onDelete: Restrict)
+  currency             Currency               @relation(fields: [currencyCode], references: [code], onDelete: Restrict)
+  walletAccount        WalletAccount?
+  ledgerAccount        LedgerAccount?
+  holds                WalletHold[]
+  outgoingTransactions FinancialTransaction[] @relation("TransactionSourceWallet")
+  incomingTransactions FinancialTransaction[] @relation("TransactionDestinationWallet")
+  outgoingTransfers    Transfer[]             @relation("TransferSourceWallet")
+  incomingTransfers    Transfer[]             @relation("TransferDestinationWallet")
+  deposits             Deposit[]
+  withdrawals          Withdrawal[]
+
+  @@index([userId, status])
+  @@index([currencyCode])
+  @@map("wallets")
+}
+
+// Balance projection. The source of truth is the ledger; SQL triggers verify at commit that
+// balanceMinor equals the sum of credits minus debits on the linked ledger account.
+model WalletAccount {
+  id              String   @id @default(cuid())
+  walletId        String   @unique
+  ledgerAccountId String   @unique
+  balanceMinor    BigInt   @default(0)
+  heldMinor       BigInt   @default(0)
+  version         Int      @default(0)
+  createdAt       DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime @updatedAt @db.Timestamptz(3)
+
+  wallet        Wallet        @relation(fields: [walletId], references: [id], onDelete: Restrict)
+  ledgerAccount LedgerAccount @relation(fields: [ledgerAccountId], references: [id], onDelete: Restrict)
+
+  @@index([ledgerAccountId])
+  @@map("wallet_accounts")
+}
+
+model LedgerAccount {
+  id            String            @id @default(cuid())
+  code          String            @unique
+  name          String
+  type          LedgerAccountType
+  normalBalance NormalBalance
+  currencyCode  String            @db.VarChar(3)
+  walletId      String?           @unique
+  isSystem      Boolean           @default(false)
+  isActive      Boolean           @default(true)
+  createdAt     DateTime          @default(now()) @db.Timestamptz(3)
+
+  currency      Currency           @relation(fields: [currencyCode], references: [code], onDelete: Restrict)
+  wallet        Wallet?            @relation(fields: [walletId], references: [id], onDelete: Restrict)
+  walletAccount WalletAccount?
+  lines         JournalEntryLine[]
+
+  @@index([type, currencyCode])
+  @@map("ledger_accounts")
+}
+
+model WalletHold {
+  id            String     @id @default(cuid())
+  walletId      String
+  transactionId String     @unique
+  amountMinor   BigInt
+  status        HoldStatus @default(ACTIVE)
+  createdAt     DateTime   @default(now()) @db.Timestamptz(3)
+  releasedAt    DateTime?  @db.Timestamptz(3)
+  consumedAt    DateTime?  @db.Timestamptz(3)
+
+  wallet      Wallet               @relation(fields: [walletId], references: [id], onDelete: Restrict)
+  transaction FinancialTransaction @relation(fields: [transactionId], references: [id], onDelete: Restrict)
+
+  @@index([walletId, status])
+  @@map("wallet_holds")
+}
+
+// ---------------------------------------------------------------------------
+// Double-entry ledger
+// ---------------------------------------------------------------------------
+
+model JournalEntry {
+  id              String             @id @default(cuid())
+  reference       String             @unique
+  transactionId   String?
+  createdById     String?
+  currencyCode    String             @db.VarChar(3)
+  description     String
+  status          JournalEntryStatus @default(POSTED)
+  reversesEntryId String?            @unique
+  metadata        Json?
+  createdAt       DateTime           @default(now()) @db.Timestamptz(3)
+
+  transaction     FinancialTransaction? @relation(fields: [transactionId], references: [id], onDelete: Restrict)
+  createdBy       User?                 @relation("JournalCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  currency        Currency              @relation(fields: [currencyCode], references: [code], onDelete: Restrict)
+  lines           JournalEntryLine[]
+  reversesEntry   JournalEntry?         @relation("JournalReversal", fields: [reversesEntryId], references: [id], onDelete: Restrict)
+  reversedByEntry JournalEntry?         @relation("JournalReversal")
+
+  @@index([transactionId])
+  @@index([currencyCode, createdAt])
+  @@index([createdAt])
+  @@map("journal_entries")
+}
+
+model JournalEntryLine {
+  id              BigInt   @id @default(autoincrement())
+  journalEntryId  String
+  ledgerAccountId String
+  debitMinor      BigInt   @default(0)
+  creditMinor     BigInt   @default(0)
+  description     String?
+  createdAt       DateTime @default(now()) @db.Timestamptz(3)
+
+  journalEntry  JournalEntry  @relation(fields: [journalEntryId], references: [id], onDelete: Restrict)
+  ledgerAccount LedgerAccount @relation(fields: [ledgerAccountId], references: [id], onDelete: Restrict)
+
+  @@index([journalEntryId])
+  @@index([ledgerAccountId])
+  @@map("journal_entry_lines")
+}
+
+// ---------------------------------------------------------------------------
+// Financial transactions & products
+// ---------------------------------------------------------------------------
+
+model FinancialTransaction {
+  id                  String            @id @default(cuid())
+  reference           String            @unique
+  type                TransactionType
+  status              TransactionStatus @default(PENDING)
+  amountMinor         BigInt
+  feeMinor            BigInt            @default(0)
+  currencyCode        String            @db.VarChar(3)
+  initiatorUserId     String?
+  sourceWalletId      String?
+  destinationWalletId String?
+  description         String?
+  failureCode         String?
+  failureReason       String?
+  metadata            Json?
+  createdAt           DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime          @updatedAt @db.Timestamptz(3)
+  completedAt         DateTime?         @db.Timestamptz(3)
+
+  currency          Currency       @relation(fields: [currencyCode], references: [code], onDelete: Restrict)
+  initiator         User?          @relation("TransactionInitiator", fields: [initiatorUserId], references: [id], onDelete: SetNull)
+  sourceWallet      Wallet?        @relation("TransactionSourceWallet", fields: [sourceWalletId], references: [id], onDelete: Restrict)
+  destinationWallet Wallet?        @relation("TransactionDestinationWallet", fields: [destinationWalletId], references: [id], onDelete: Restrict)
+  journalEntries    JournalEntry[]
+  transfer          Transfer?
+  deposit           Deposit?
+  withdrawal        Withdrawal?
+  hold              WalletHold?
+
+  @@index([initiatorUserId, createdAt])
+  @@index([sourceWalletId, createdAt])
+  @@index([destinationWalletId, createdAt])
+  @@index([type, status, createdAt])
+  @@index([currencyCode, createdAt])
+  @@map("financial_transactions")
+}
+
+model Transfer {
+  id                  String   @id @default(cuid())
+  transactionId       String   @unique
+  senderUserId        String
+  recipientUserId     String
+  sourceWalletId      String
+  destinationWalletId String
+  amountMinor         BigInt
+  feeMinor            BigInt   @default(0)
+  currencyCode        String   @db.VarChar(3)
+  description         String?
+  createdAt           DateTime @default(now()) @db.Timestamptz(3)
+
+  transaction       FinancialTransaction @relation(fields: [transactionId], references: [id], onDelete: Restrict)
+  sender            User                 @relation("TransferSender", fields: [senderUserId], references: [id], onDelete: Restrict)
+  recipient         User                 @relation("TransferRecipient", fields: [recipientUserId], references: [id], onDelete: Restrict)
+  sourceWallet      Wallet               @relation("TransferSourceWallet", fields: [sourceWalletId], references: [id], onDelete: Restrict)
+  destinationWallet Wallet               @relation("TransferDestinationWallet", fields: [destinationWalletId], references: [id], onDelete: Restrict)
+
+  @@index([senderUserId, createdAt])
+  @@index([recipientUserId, createdAt])
+  @@map("transfers")
+}
+
+model Deposit {
+  id                String          @id @default(cuid())
+  transactionId     String          @unique
+  userId            String
+  walletId          String
+  currencyCode      String          @db.VarChar(3)
+  amountMinor       BigInt
+  provider          PaymentProvider
+  providerReference String          @unique
+  status            DepositStatus   @default(PENDING)
+  failureCode       String?
+  failureReason     String?
+  expiresAt         DateTime        @db.Timestamptz(3)
+  createdAt         DateTime        @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime        @updatedAt @db.Timestamptz(3)
+  completedAt       DateTime?       @db.Timestamptz(3)
+
+  transaction FinancialTransaction @relation(fields: [transactionId], references: [id], onDelete: Restrict)
+  user        User                 @relation(fields: [userId], references: [id], onDelete: Restrict)
+  wallet      Wallet               @relation(fields: [walletId], references: [id], onDelete: Restrict)
+  currency    Currency             @relation(fields: [currencyCode], references: [code], onDelete: Restrict)
+
+  @@index([userId, createdAt])
+  @@index([walletId, createdAt])
+  @@index([status, expiresAt])
+  @@map("deposits")
+}
+
+model Withdrawal {
+  id              String           @id @default(cuid())
+  transactionId   String           @unique
+  userId          String
+  walletId        String
+  currencyCode    String           @db.VarChar(3)
+  amountMinor     BigInt
+  feeMinor        BigInt           @default(0)
+  status          WithdrawalStatus @default(PENDING)
+  payoutMethodId  String
+  payoutReference String?
+  payoutAttempts  Int              @default(0)
+  lastPayoutError String?
+  reviewedById    String?
+  reviewedAt      DateTime?        @db.Timestamptz(3)
+  reviewNote      String?
+  rejectionReason String?
+  failureCode     String?
+  failureReason   String?
+  createdAt       DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime         @updatedAt @db.Timestamptz(3)
+  completedAt     DateTime?        @db.Timestamptz(3)
+
+  transaction  FinancialTransaction   @relation(fields: [transactionId], references: [id], onDelete: Restrict)
+  user         User                   @relation(fields: [userId], references: [id], onDelete: Restrict)
+  wallet       Wallet                 @relation(fields: [walletId], references: [id], onDelete: Restrict)
+  currency     Currency               @relation(fields: [currencyCode], references: [code], onDelete: Restrict)
+  payoutMethod PaymentMethodReference @relation(fields: [payoutMethodId], references: [id], onDelete: Restrict)
+  reviewedBy   User?                  @relation("WithdrawalReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([walletId, createdAt])
+  @@index([status, createdAt])
+  @@map("withdrawals")
+}
+
+model PaymentMethodReference {
+  id            String            @id @default(cuid())
+  userId        String
+  type          PaymentMethodType
+  provider      PaymentProvider
+  providerToken String
+  bankName      String
+  accountLast4  String
+  isDefault     Boolean           @default(false)
+  createdAt     DateTime          @default(now()) @db.Timestamptz(3)
+  deletedAt     DateTime?         @db.Timestamptz(3)
+
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  withdrawals Withdrawal[]
+
+  @@index([userId, deletedAt])
+  @@map("payment_methods")
+}
+
+// ---------------------------------------------------------------------------
+// Idempotency, limits, audit, security & notifications
+// ---------------------------------------------------------------------------
+
+model IdempotencyKey {
+  id             String            @id @default(cuid())
+  userId         String
+  scope          String
+  key            String
+  requestHash    String
+  status         IdempotencyStatus @default(IN_PROGRESS)
+  responseStatus Int?
+  responseBody   Json?
+  resourceType   String?
+  resourceId     String?
+  createdAt      DateTime          @default(now()) @db.Timestamptz(3)
+  completedAt    DateTime?         @db.Timestamptz(3)
+  expiresAt      DateTime          @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, scope, key])
+  @@index([expiresAt])
+  @@map("idempotency_keys")
+}
+
+model TransactionLimit {
+  id                     String     @id @default(cuid())
+  scope                  LimitScope
+  currencyCode           String     @db.VarChar(3)
+  userId                 String?
+  perTransactionMinMinor BigInt     @default(1)
+  perTransactionMaxMinor BigInt
+  dailyMaxMinor          BigInt?
+  monthlyMaxMinor        BigInt?
+  isActive               Boolean    @default(true)
+  createdAt              DateTime   @default(now()) @db.Timestamptz(3)
+  updatedAt              DateTime   @updatedAt @db.Timestamptz(3)
+
+  currency Currency @relation(fields: [currencyCode], references: [code], onDelete: Restrict)
+  user     User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([scope, currencyCode, isActive])
+  @@index([userId])
+  @@map("transaction_limits")
+}
+
+model FeePolicy {
+  id           String       @id @default(cuid())
+  operation    FeeOperation
+  currencyCode String       @db.VarChar(3)
+  flatMinor    BigInt       @default(0)
+  percentBps   Int          @default(0)
+  minFeeMinor  BigInt       @default(0)
+  maxFeeMinor  BigInt?
+  isActive     Boolean      @default(true)
+  createdAt    DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime     @updatedAt @db.Timestamptz(3)
+
+  currency Currency @relation(fields: [currencyCode], references: [code], onDelete: Restrict)
+
+  @@unique([operation, currencyCode])
+  @@map("fee_policies")
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  actorUserId String?
+  actorRole   String
+  action      String
+  entityType  String
+  entityId    String
+  beforeState Json?
+  afterState  Json?
+  reason      String?
+  requestId   String?
+  ipHash      String?
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  actor User? @relation("AuditActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([actorUserId, createdAt])
+  @@index([entityType, entityId])
+  @@index([action, createdAt])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  type      NotificationType
+  title     String
+  body      String
+  data      Json?
+  readAt    DateTime?        @db.Timestamptz(3)
+  createdAt DateTime         @default(now()) @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt, createdAt])
+  @@map("notifications")
+}
+
+model SecurityEvent {
+  id        String            @id @default(cuid())
+  userId    String?
+  type      SecurityEventType
+  severity  SecuritySeverity
+  ipHash    String?
+  userAgent String?
+  metadata  Json?
+  createdAt DateTime          @default(now()) @db.Timestamptz(3)
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([type, createdAt])
+  @@index([severity, createdAt])
+  @@map("security_events")
+}
+
+model WebhookEvent {
+  id          String          @id @default(cuid())
+  provider    PaymentProvider
+  eventId     String
+  payloadHash String
+  status      WebhookStatus   @default(PROCESSED)
+  error       String?
+  receivedAt  DateTime        @default(now()) @db.Timestamptz(3)
+  processedAt DateTime?       @db.Timestamptz(3)
+
+  @@unique([provider, eventId])
+  @@index([receivedAt])
+  @@map("webhook_events")
+}

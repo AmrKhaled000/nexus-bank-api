@@ -1,0 +1,152 @@
+# Local demo stack for NEXUS BANK (educational simulation). It is NOT a production topology.
+# For production hardening see docs/DEPLOYMENT.md. Bring it up with:
+#   docker compose up --build
+# Optional observability profile:
+#   docker compose --profile observability up --build
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: nexus_bank
+    ports:
+      - "5432:5432"
+    volumes:
+      - nexus-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d nexus_bank"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    build: .
+    command: npx prisma migrate deploy
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/nexus_bank?schema=public
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  seed:
+    build: .
+    profiles: ["demo"]
+    command: npx prisma db seed
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/nexus_bank?schema=public
+      SEED_PASSWORD: "NexusDemo#2026"
+      JWT_ACCESS_SECRET: local-demo-jwt-access-secret-at-least-32-characters
+      JWT_ISSUER: nexus-bank
+      JWT_AUDIENCE: nexus-bank-api
+      ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      PIN_PEPPER: local-demo-pin-pepper-at-least-32-characters-long
+      IP_HASH_SECRET: local-demo-ip-hash-secret-at-least-32-chars
+      PAYMENT_WEBHOOK_SECRET: local-demo-payment-webhook-secret-32-chars
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
+  api:
+    build: .
+    restart: unless-stopped
+    command: node dist/server.js
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: development
+      PORT: "3000"
+      API_PREFIX: /api/v1
+      APP_BASE_URL: http://localhost:3000
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/nexus_bank?schema=public
+      REDIS_URL: redis://redis:6379
+      QUEUE_ENABLED: "true"
+      RATE_LIMIT_ENABLED: "true"
+      JWT_ACCESS_SECRET: local-demo-jwt-access-secret-at-least-32-characters
+      JWT_ACCESS_TTL_SECONDS: "900"
+      JWT_ISSUER: nexus-bank
+      JWT_AUDIENCE: nexus-bank-api
+      REFRESH_TOKEN_TTL_DAYS: "30"
+      ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      PIN_PEPPER: local-demo-pin-pepper-at-least-32-characters-long
+      IP_HASH_SECRET: local-demo-ip-hash-secret-at-least-32-chars
+      PAYMENT_PROVIDER: simulated
+      PAYMENT_WEBHOOK_SECRET: local-demo-payment-webhook-secret-32-chars
+      PAYOUT_PROVIDER: simulated
+      SIMULATED_PAYOUT_OUTCOME: success
+      CORS_ORIGINS: http://localhost:3001
+      METRICS_ENABLED: "true"
+      OTEL_ENABLED: "false"
+      LOG_LEVEL: info
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: .
+    restart: unless-stopped
+    command: node dist/workers/index.js
+    environment:
+      NODE_ENV: development
+      API_PREFIX: /api/v1
+      APP_BASE_URL: http://localhost:3000
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/nexus_bank?schema=public
+      REDIS_URL: redis://redis:6379
+      QUEUE_ENABLED: "true"
+      JWT_ACCESS_SECRET: local-demo-jwt-access-secret-at-least-32-characters
+      JWT_ISSUER: nexus-bank
+      JWT_AUDIENCE: nexus-bank-api
+      ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      PIN_PEPPER: local-demo-pin-pepper-at-least-32-characters-long
+      IP_HASH_SECRET: local-demo-ip-hash-secret-at-least-32-chars
+      PAYMENT_WEBHOOK_SECRET: local-demo-payment-webhook-secret-32-chars
+      PAYOUT_PROVIDER: simulated
+      SIMULATED_PAYOUT_OUTCOME: success
+      OTEL_ENABLED: "false"
+      LOG_LEVEL: info
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    profiles: ["observability"]
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - api
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    profiles: ["observability"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  nexus-pgdata:

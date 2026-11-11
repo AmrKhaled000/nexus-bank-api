@@ -1,0 +1,17 @@
+.git
+.github
+node_modules
+dist
+coverage
+.dev-mail
+.dev-mail-test
+.env
+.env.test
+*.log
+.DS_Store
+.vscode
+.idea
+docs
+postman
+tests
+*.tsbuildinfo
